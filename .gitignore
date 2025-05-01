@@ -1,0 +1,10 @@
+# Ignore macOS system files
+.DS_Store
+
+# Ignore shell script logs
+*.log
+
+# Ignore other temporary files
+*.tmp
+*.swp
+*.bak
