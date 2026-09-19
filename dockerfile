@@ -1,38 +1,62 @@
-FROM ubuntu:25.04
+FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# install app dependencies
+
+# Install app dependencies
 RUN apt-get update && apt-get install -y \
-    gawk wget git git-lfs diffstat unzip texinfo gcc-multilib chrpath socat cpio \
-    python3 python3-pip python3-pexpect xz-utils debianutils iputils-ping \
-    python3-git python3-jinja2 libegl1 libsdl1.2-dev pylint xterm \
-    libssl-dev libgmp-dev libmpc-dev lz4 zstd build-essential libncurses-dev \
-    libyaml-dev libelf-dev libxml2-utils xsltproc docbook-utils \
-    python3-setuptools python3-wheel python3-pyparsing python3-requests \
-    libncurses5-dev libncursesw5-dev libreadline-dev libffi-dev libbz2-dev \
-    liblzma-dev zlib1g-dev libsqlite3-dev tk-dev libgdbm-dev libexpat1-dev \
-    libmpfr-dev python-is-python3 coreutils sed curl bc dos2unix \
-    flex bison libgpiod-dev libgpiod-doc\
+    build-essential \
+    python3 \
+    wget \
+    bc \
+    bison \
+    flex \
+    libssl-dev \
+    libelf-dev \
+    zstd \
+    xz-utils \
+    file \
+    cpio \
+    gawk \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-RUN echo 'options mmc_block perdev_minors=16' > /tmp/mmc_block.conf \
-    && mkdir -p /etc/modprobe.d \
-    && mv /tmp/mmc_block.conf /etc/modprobe.d/mmc_block.conf
+# Chain the COPY, extract, install, and clean steps to save image space
+COPY en.SDK-x86_64-stm32mp1-openstlinux-6.6-yocto-scarthgap-mpu-v24.11.06.tar.gz /tmp/
+RUN tar -xzf /tmp/en.SDK-x86_64-stm32mp1-openstlinux-6.6-yocto-scarthgap-mpu-v24.11.06.tar.gz -C /opt && \
+    chmod +x /opt/stm32mp1-openstlinux-6.6-yocto-scarthgap-mpu-v24.11.06/sdk/*.sh && \
+    /opt/stm32mp1-openstlinux-6.6-yocto-scarthgap-mpu-v24.11.06/sdk/*.sh -d /opt/Developer-Package/SDK -y && \
+    rm -f /tmp/en.SDK-x86_64-stm32mp1-openstlinux-6.6-yocto-scarthgap-mpu-v24.11.06.tar.gz && \
+    rm -rf /opt/stm32mp1-openstlinux-6.6-yocto-scarthgap-mpu-v24.11.06
 
-# install app
-COPY en.SDK-x86_64-stm32mp1-openstlinux-6.6-yocto-scarthgap-mpu-v24.11.06.tar.gz /tmp
-RUN tar -xzf /tmp/en.SDK-x86_64-stm32mp1-openstlinux-6.6-yocto-scarthgap-mpu-v24.11.06.tar.gz -C /opt
-RUN chmod +x /opt/stm32mp1-openstlinux-6.6-yocto-scarthgap-mpu-v24.11.06/sdk/st-image-weston-openstlinux-weston-stm32mp1.rootfs-x86_64-toolchain-5.0.3-openstlinux-6.6-yocto-scarthgap-mpu-v24.11.06.sh
-RUN /opt/stm32mp1-openstlinux-6.6-yocto-scarthgap-mpu-v24.11.06/sdk/st-image-weston-openstlinux-weston-stm32mp1.rootfs-x86_64-toolchain-5.0.3-openstlinux-6.6-yocto-scarthgap-mpu-v24.11.06.sh -d /opt/Developer-Package/SDK
-RUN chmod +x /opt/Developer-Package/SDK/environment-setup-cortexa7t2hf-neon-vfpv4-ostl-linux-gnueabi
+# Extract the Kernel Sources and apply ST Wiki build steps
+COPY SOURCES-*.tar.gz /tmp/
+RUN tar -xzf /tmp/SOURCES-*.tar.gz -C /opt && \
+    rm -f /tmp/SOURCES-*.tar.gz && \
+    /bin/bash -c " \
+    source /opt/Developer-Package/SDK/environment-setup-* && \
+    cd /opt/*openstlinux-*/sources/*/linux-stm32mp-*/ && \
+    tar xf linux-*.tar.xz && \
+    cd linux-[0-9]*/ && \
+    for p in ../*.patch; do [ -e \"\$p\" ] && patch -p1 < \"\$p\"; done; \
+    export OUTPUT_BUILD_DIR=\$PWD/../build && \
+    mkdir -p \${OUTPUT_BUILD_DIR} && \
+    make O=\"\${OUTPUT_BUILD_DIR}\" defconfig && \
+    for f in ../fragment*.config; do [ -e \"\$f\" ] && scripts/kconfig/merge_config.sh -m -r -O \${OUTPUT_BUILD_DIR} \${OUTPUT_BUILD_DIR}/.config \"\$f\"; done; \
+    scripts/config --file \${OUTPUT_BUILD_DIR}/.config --disable CONFIG_VIDEO_ATMEL_ISI && \
+    (yes '' || true) | make oldconfig O=\"\${OUTPUT_BUILD_DIR}\" && \
+    make uImage vmlinux dtbs LOADADDR=0xC2000040 O=\"\${OUTPUT_BUILD_DIR}\" && \
+    export IMAGE_KERNEL=\"uImage\" && \
+    make modules O=\"\${OUTPUT_BUILD_DIR}\" && \
+    make INSTALL_MOD_PATH=\"\${OUTPUT_BUILD_DIR}/install_artifact\" modules_install O=\"\${OUTPUT_BUILD_DIR}\" && \
+    mkdir -p \${OUTPUT_BUILD_DIR}/install_artifact/boot/ && \
+    cp \${OUTPUT_BUILD_DIR}/arch/\${ARCH}/boot/\${IMAGE_KERNEL} \${OUTPUT_BUILD_DIR}/install_artifact/boot/ && \
+    find \${OUTPUT_BUILD_DIR}/arch/\${ARCH}/boot/dts/ -name 'st*.dtb' -exec cp '{}' \${OUTPUT_BUILD_DIR}/install_artifact/boot/ \; \
+    "
 
-COPY init.sh /opt
+COPY init.sh /opt/
 RUN chmod +x /opt/init.sh
 
-# clean
-RUN rm -f /tmp/en.SDK-x86_64-stm32mp1-openstlinux-6.6-yocto-scarthgap-mpu-v24.11.06.tar.gz
-RUN rm -rf /opt/stm32mp1-openstlinux-6.6-yocto-scarthgap-mpu-v24.11.06
+# Set working directory for when you mount your driver code
+WORKDIR /workspace
 
-# source the environment
-ENTRYPOINT ["/bin/bash", "/opt/init.sh"]
+ENTRYPOINT ["/opt/init.sh"]
